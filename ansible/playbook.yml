@@ -1,0 +1,185 @@
+---
+- name: Install Jenkins
+  hosts: jenkins
+  become: true
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+            
+    - name: Install curl
+      apt:
+        name: curl
+        state: present
+
+    - name: Install gnupg
+      apt:
+        name: gnupg
+        state: present
+
+    - name: Add Jenkins APT keyring
+      shell: "curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo tee /usr/share/keyrings/jenkins-keyring.asc"
+      args:
+        executable: /bin/bash
+
+    - name: Add Jenkins APT repository
+      shell: sudo sh -c 'echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/ > /etc/apt/sources.list.d/jenkins.list'
+      args:
+        executable: /bin/bash
+
+    - name: Install Java
+      apt:
+        name: openjdk-17-jdk
+        state: present
+
+    - name: Update package cache
+      apt:
+        update_cache: yes
+            
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+
+    - name: Start Jenkins service
+      service:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    # - name: Retrieve initialAdminPassword file
+    #   fetch:
+    #     src: /var/lib/jenkins/secrets/initialAdminPassword
+    #     dest: "{{ playbook_dir }}/initialAdminPassword"
+    #     flat: yes
+
+
+- name: Install and start Docker service
+  hosts: cicd
+  become: yes
+  tasks:
+    - name: Install required system packages
+      apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - python3-pip
+          - virtualenv
+          - python3-setuptools
+        state: latest
+        update_cache: true
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu focal stable
+        state: present
+
+    - name: Install Docker Module for Python
+      pip:
+        name: docker
+
+    - name: Update apt and install docker-ce
+      apt:
+        name: docker-ce
+        state: latest
+        update_cache: true
+
+    - name: 777 for docker.sock
+      file:
+        path: /var/run/docker.sock
+        state: file
+        mode: 777
+
+    - name: start docker services
+      service: 
+        name: docker
+        state: started
+
+    - name: start docker on boot 
+      service:
+        name: docker
+        enabled: yes
+
+
+- name: Run SonarQube Container
+  hosts: sonar
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Run SonarQube Container
+      docker_container:
+        name: sonarqube
+        image: sonarqube
+        state: started
+        restart_policy: always
+        ports:
+          - "9000:9000"
+
+
+- name: Run Grafana and Prometheus Containers
+  hosts: monitor
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Run Grafana Container
+      docker_container:
+        name: grafana
+        image: grafana/grafana:latest
+        ports:
+          - "3000:3000"
+        restart_policy: always
+
+    - name: Run Prometheus Container
+      docker_container:
+        name: prometheus
+        image: bitnami/prometheus:latest
+        ports: 
+          - "9090:9090"
+        restart_policy: always
+
+
+- name: Configure Kubernetes cluster using kOps
+  hosts: kops
+  become: yes
+  gather_facts: false
+  
+  tasks:
+    - name: Install requiried python3-pip
+      apt:
+        pkg:
+          - python3-pip
+        state: present
+        update_cache: true
+
+    - name: Install AWS CLI
+      pip:
+        name: awscli
+        executable: pip3
+        state: present
+
+    - name: Create SSH key
+      shell: "ssh-keygen -N '' -f $HOME/.ssh/id_rsa"
+      
+    - name: Install kubectl
+      shell: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+    - name: Install kOps
+      shell: |
+        curl -Lo kops https://github.com/kubernetes/kops/releases/download/$(curl -s https://api.github.com/repos/kubernetes/kops/releases/latest | grep tag_name | cut -d '"' -f 4)/kops-linux-amd64
+        chmod +x kops
+        mv kops /usr/local/bin/kops
+
+    #- name: Create Kubernetes cluster with kOps
+    #  shell: "kops create cluster --name={{ lookup('env', 'CLUSTER_NAME') }} --state=s3://{{ lookup('env', 'STATE_BUCKET') }} --zones={{ lookup('env', 'AWS_REGION') }}a,{{ lookup('env', 'AWS_REGION') }}b --node-count={{ lookup('env', 'NUMBER_OF_NODES') }} --node-size=t3.micro --control-plane-size=t3.small --dns-zone={{ lookup('env', 'CLUSTER_NAME') }} --node-volume-size=8 --control-plane-volume-size=8"
+      
+    # - name: Run Kubernetes cluster with kOps
+    #   shell: "kops update cluster --name {{ lookup('env', 'CLUSTER_NAME') }} --state=s3://{{ lookup('env', 'CLUSTER_NAME') }} --yes --admin""

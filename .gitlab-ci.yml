@@ -1,0 +1,140 @@
+image:
+  name: registry.gitlab.com/devops2970111/terraform-ansible-cicd:v2
+  entrypoint:
+    - '/usr/bin/env'
+    - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+variables:
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+  AWS_REGION: "eu-central-1"
+  CLUSTER_NAME: "kops.cvapplication.xyz"
+  STATE_BUCKET: "gitlab-kops-state-1503"
+  NUMBER_OF_NODES: "2"
+
+stages:
+  - validate
+  - plan
+  - apply
+  - ansible
+  - create_cluster
+  - destroy
+
+########################################################
+validate:
+  stage: validate
+  before_script:
+    - terraform init
+  
+  script: 
+    - terraform validate
+
+    - terraform destroy -auto-approve
+    - sleep 100
+  artifacts:
+    paths:
+      - planfile
+
+########################################################
+plan:
+  stage: plan
+  dependencies:
+    - validate
+  before_script:
+    - terraform init  
+  
+  script: 
+    - terraform plan -out="planfile"
+  #when: manual
+  artifacts:
+    paths:
+      - planfile
+
+########################################################
+apply:
+  stage: apply
+  dependencies:
+    - plan
+  before_script:
+    - terraform init
+
+  script:
+    - terraform apply -auto-approve -input=false "planfile"
+
+    - export JENKINS_IP=$(terraform output Jenkins_public_ip | sed 's/\[//;s/\]//;s/,//;s/"//g' | tr -d '[:space:]')
+    - export SONAR_IP=$(terraform output Sonar_public_ip | sed 's/\[//;s/\]//;s/,//;s/"//g' | tr -d '[:space:]')
+    - export MONITOR_IP=$(terraform output Monitor_public_ip | sed 's/\[//;s/\]//;s/,//;s/"//g' | tr -d '[:space:]')
+    - export KOPS_IP=$(terraform output Kops_public_ip | sed 's/\[//;s/\]//;s/,//;s/"//g' | tr -d '[:space:]')
+    - echo $KOPS_IP >> kops_ip
+    - echo $JENKINS_IP >> jenkins_ip
+    - sed -i "s/\$JENKINS_IP/$JENKINS_IP/g; s/\$KOPS_IP/$KOPS_IP/g; s/\$MONITOR_IP/$MONITOR_IP/g; s/\$SONAR_IP/$SONAR_IP/g" ansible/inventory
+    - cat ansible/inventory
+     
+  #when: manual
+  artifacts:
+    paths:
+      - ansible/inventory
+      - kops_ip
+      - jenkins_ip
+      
+########################################################
+ansible:
+  stage: ansible
+  dependencies:
+    - apply
+  before_script:
+    - 'which ssh-agent || ( apt-get -qq install openssh-client)'
+    - eval $(ssh-agent)
+    - chmod 700 "$SSH_PRIVATE_KEY"
+    - export ANSIBLE_HOST_KEY_CHECKING=False
+    - export JENKINS_IP=$(cat jenkins_ip)
+  
+  script:  
+    - cat ansible/inventory
+    - ansible-playbook -i ansible/inventory ansible/playbook.yml --private-key=$SSH_PRIVATE_KEY
+
+    - ssh -i "$SSH_PRIVATE_KEY" -o StrictHostKeyChecking=no ubuntu@$JENKINS_IP "sudo cat /var/lib/jenkins/secrets/initialAdminPassword"
+
+  #when: manual
+  artifacts:
+    paths:
+      - kops_ip
+      
+########################################################
+create_cluster:
+  stage: create_cluster
+  dependencies:
+    - ansible
+  before_script:
+    - 'which ssh-agent || ( apt-get -qq install openssh-client)'
+    - eval $(ssh-agent)
+    - chmod 700 "$SSH_PRIVATE_KEY"
+    - export KOPS_IP=$(cat kops_ip)
+  
+  script:    
+    - ssh -i "$SSH_PRIVATE_KEY" -o StrictHostKeyChecking=no ubuntu@$KOPS_IP "aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID"
+    - ssh -i "$SSH_PRIVATE_KEY" ubuntu@$KOPS_IP "aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY"
+    - ssh -i "$SSH_PRIVATE_KEY" ubuntu@$KOPS_IP "aws configure set region $AWS_REGION"
+    - ssh -i "$SSH_PRIVATE_KEY" ubuntu@$KOPS_IP "kops create cluster --name=$CLUSTER_NAME --state=s3://$STATE_BUCKET --zones=$AWS_REGION"a",$AWS_REGION"b" --node-count=$NUMBER_OF_NODES --node-size=t3.micro --control-plane-size=t3.small --dns-zone=$CLUSTER_NAME --node-volume-size=8 --control-plane-volume-size=8"
+    - ssh -i "$SSH_PRIVATE_KEY" ubuntu@$KOPS_IP "kops update cluster --name=$CLUSTER_NAME --state=s3://$STATE_BUCKET --yes --admin"
+  #when: manual
+  artifacts:
+    paths:
+      - kops_ip
+
+########################################################
+destroy:
+  stage: destroy
+  before_script:
+    - 'which ssh-agent || ( apt-get -qq install openssh-client)'
+    - eval $(ssh-agent)
+    - chmod 700 "$SSH_PRIVATE_KEY"
+    - export KOPS_IP=$(cat kops_ip)
+  
+  script:  
+    - ssh -i "$SSH_PRIVATE_KEY" -o StrictHostKeyChecking=no ubuntu@$KOPS_IP kops delete cluster --name=$CLUSTER_NAME --state=s3://$STATE_BUCKET --yes
+    - ssh -i "$SSH_PRIVATE_KEY" -o StrictHostKeyChecking=no ubuntu@$KOPS_IP "aws s3 rm s3://gitlab-kops-state-1503 --recursive"
+
+    - terraform init
+    - terraform destroy -auto-approve
+  when: manual

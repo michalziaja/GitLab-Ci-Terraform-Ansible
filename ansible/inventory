@@ -1,0 +1,7 @@
+[cicd]
+jenkins ansible_host=$JENKINS_IP ansible_user=ubuntu
+sonar ansible_host=$SONAR_IP ansible_user=ubuntu
+monitor ansible_host=$MONITOR_IP ansible_user=ubuntu
+
+[k8s]
+kops ansible_host=$KOPS_IP ansible_user=ubuntu
